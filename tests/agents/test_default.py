@@ -558,3 +558,87 @@ def test_format_errors_count_against_cost_limit(toolcall_config, reset_global_st
     assert agent.n_calls == 3
     assert agent.cost == 3.0
     assert agent.cost == GLOBAL_MODEL_STATS.cost
+
+
+def test_independent_verification_pass_preserves_submission(default_config, monkeypatch):
+    """A successful verifier must preserve the original Submitted payload."""
+    from minisweagent.exceptions import Submitted
+
+    config = dict(default_config)
+    config["verification_command"] = "VERIFY"
+    config["verification_timeout_seconds"] = 5
+
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **config,
+    )
+
+    original_execute = agent.env.execute
+
+    def execute(action, *args, **kwargs):
+        if action.get("command") == "VERIFY":
+            return {"output": "verified\n", "returncode": 0, "exception_info": ""}
+        return original_execute(action, *args, **kwargs)
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    with pytest.raises(Submitted) as exc_info:
+        agent.execute_actions(
+            {
+                "extra": {
+                    "actions": [
+                        {
+                            "command": (
+                                "printf 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\\n"
+                                "verified submission\\n'"
+                            )
+                        }
+                    ]
+                }
+            }
+        )
+
+    message = exc_info.value.messages[0]
+    assert message["extra"]["exit_status"] == "Submitted"
+    assert message["extra"]["submission"] == "verified submission\n"
+
+
+def test_independent_verification_failure_blocks_submission(default_config, monkeypatch):
+    """A failed verifier must prevent submission and return feedback."""
+    config = dict(default_config)
+    config["verification_command"] = "VERIFY"
+    config["verification_timeout_seconds"] = 5
+
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **config,
+    )
+
+    original_execute = agent.env.execute
+
+    def execute(action, *args, **kwargs):
+        if action.get("command") == "VERIFY":
+            return {"output": "test failure\n", "returncode": 1, "exception_info": ""}
+        return original_execute(action, *args, **kwargs)
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    result = agent.execute_actions(
+        {
+            "extra": {
+                "actions": [
+                    {
+                        "command": (
+                            "printf 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\\n"
+                            "should not submit\\n'"
+                        )
+                    }
+                ]
+            }
+        }
+    )
+
+    assert result[-1]["content"].startswith("Independent verification failed.")
+    assert "test failure" in result[-1]["content"]

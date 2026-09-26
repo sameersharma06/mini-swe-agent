@@ -33,6 +33,8 @@ class AgentConfig(BaseModel):
     """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
     max_consecutive_format_errors: int = 3
     max_consecutive_execution_errors: int = 3
+    verification_command: str | None = None
+    verification_timeout_seconds: int = 30
     """Exit after this many format errors in a row (0 = no limit)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
@@ -186,27 +188,33 @@ class DefaultAgent:
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
-        """Execute actions, intercepting the completion protocol before shell execution."""
+        """Execute actions and optionally independently verify completion."""
         actions = message.get("extra", {}).get("actions", [])
 
-        for action in actions:
-            command = action.get("command", "").strip()
-            if command in {
-                "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
-                "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
-            }:
-                raise Submitted(
-                    {
-                        "role": "exit",
-                        "content": "",
-                        "extra": {
-                            "exit_status": "Submitted",
-                            "submission": "",
-                        },
-                    }
-                )
+        try:
+            outputs = [self.env.execute(action) for action in actions]
+        except Submitted:
+            if not self.config.verification_command:
+                raise
 
-        outputs = [self.env.execute(action) for action in actions]
+            verification = self.env.execute(
+                {"command": self.config.verification_command},
+                timeout=self.config.verification_timeout_seconds,
+            )
+
+            if verification.get("returncode", 1) == 0:
+                raise
+
+            return self.add_messages(
+                {
+                    "role": "user",
+                    "content": (
+                        "Independent verification failed. "
+                        "Fix the issue and try again.\\n"
+                        f"Verifier output:\\n{verification.get('output', '')}"
+                    ),
+                }
+            )
 
         if outputs and all(output.get("returncode", 0) != 0 for output in outputs):
             self.n_consecutive_execution_errors += 1
