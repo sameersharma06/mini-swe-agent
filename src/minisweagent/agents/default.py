@@ -7,6 +7,7 @@ import logging
 import time
 import traceback
 import os
+import re
 from pathlib import Path
 
 from jinja2 import StrictUndefined, Template
@@ -76,10 +77,17 @@ class DefaultAgent:
         )
 
     def _build_repo_context(self) -> str:
-        """Build a small, bounded repository map for initial task context."""
+        """Build a fast, bounded, task-aware repository map for initial task context."""
         root = Path(self.env.get_template_vars().get("cwd") or os.getcwd())
         if not root.is_dir():
             return ""
+
+        task = str(self.extra_template_vars.get("task", "")).lower()
+        tokens = {
+            token
+            for token in re.findall(r"[a-zA-Z0-9_./-]+", task)
+            if len(token) >= 3
+        }
 
         important = []
         for name in ("pyproject.toml", "package.json", "go.mod", "Cargo.toml", "Makefile"):
@@ -87,12 +95,39 @@ class DefaultAgent:
                 important.append(name)
 
         entries = []
+        relevant = []
+
         try:
-            for path in sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            top_level = sorted(
+                root.iterdir(),
+                key=lambda p: (not p.is_dir(), p.name.lower()),
+            )
+
+            for path in top_level:
                 if path.name.startswith(".") or path.name in {"__pycache__", "node_modules", ".git"}:
                     continue
-                prefix = path.name + "/" if path.is_dir() else path.name
-                entries.append(prefix)
+
+                if path.is_file():
+                    entries.append(path.name)
+                    if tokens & set(re.findall(r"[a-zA-Z0-9_]+", path.name.lower())):
+                        relevant.append(path.name)
+                    continue
+
+                entries.append(path.name + "/")
+
+                try:
+                    for child in sorted(path.iterdir(), key=lambda p: p.name.lower()):
+                        if child.name.startswith(".") or child.name in {"__pycache__", "node_modules", ".git"}:
+                            continue
+                        relative = f"{path.name}/{child.name}"
+                        child_tokens = set(re.findall(r"[a-zA-Z0-9_]+", relative.lower()))
+                        if tokens & child_tokens:
+                            relevant.append(relative)
+                        if len(relevant) >= 8:
+                            break
+                except OSError:
+                    continue
+
                 if len(entries) >= 40:
                     break
         except OSError:
@@ -100,8 +135,9 @@ class DefaultAgent:
 
         return (
             f"Repository root: {root}\n"
-            f"Top-level entries: {', '.join(entries)}\n"
-            f"Project metadata: {', '.join(important) if important else 'none detected'}"
+            f"Top-level entries: {', '.join(entries[:40])}\n"
+            f"Project metadata: {', '.join(important) if important else 'none detected'}\n"
+            f"Relevant files: {', '.join(relevant[:8]) if relevant else 'none identified from task terms'}"
         )
 
     def _render_template(self, template: str) -> str:
