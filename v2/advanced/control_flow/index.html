@@ -2641,6 +2641,7 @@
     <span class="n">verification_timeout_seconds</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">30</span>
     <span class="n">verification_enabled</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
     <span class="n">max_verification_attempts</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="n">max_repeated_command_attempts</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">2</span>
 <span class="w">    </span><span class="sd">"""Exit after this many format errors in a row (0 = no limit)."""</span>
     <span class="n">output_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 <span class="w">    </span><span class="sd">"""Save the trajectory to this path."""</span>
@@ -2661,6 +2662,7 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_execution_errors</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">n_verification_attempts</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">last_verification_passed</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_start_time</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">get_template_vars</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
@@ -2796,12 +2798,37 @@
         <span class="k">return</span> <span class="n">message</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">execute_actions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">message</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">"""Execute actions with optional agent-driven verification and independent verification."""</span>
+<span class="w">        </span><span class="sd">"""Execute actions with optional verification and repeated-failure protection."""</span>
         <span class="n">actions</span> <span class="o">=</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"actions"</span><span class="p">,</span> <span class="p">[])</span>
         <span class="n">outputs</span> <span class="o">=</span> <span class="p">[]</span>
 
         <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">:</span>
             <span class="n">command</span> <span class="o">=</span> <span class="n">action</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"command"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+
+            <span class="k">if</span> <span class="p">(</span>
+                <span class="n">command</span>
+                <span class="ow">and</span> <span class="ow">not</span> <span class="n">command</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"mswea_verify "</span><span class="p">)</span>
+                <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_repeated_command_attempts</span> <span class="o">&gt;</span> <span class="mi">0</span>
+                <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">max_repeated_command_attempts</span>
+            <span class="p">):</span>
+                <span class="n">attempts</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="p">[</span><span class="n">command</span><span class="p">]</span>
+                <span class="n">outputs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+                    <span class="p">{</span>
+                        <span class="s2">"output"</span><span class="p">:</span> <span class="p">(</span>
+                            <span class="sa">f</span><span class="s2">"Command repeatedly failed </span><span class="si">{</span><span class="n">attempts</span><span class="si">}</span><span class="s2"> times. "</span>
+                            <span class="s2">"Avoid repeating the same failing command and "</span>
+                            <span class="s2">"choose a different diagnostic or implementation step."</span>
+                        <span class="p">),</span>
+                        <span class="s2">"returncode"</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+                        <span class="s2">"exception_info"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
+                        <span class="s2">"extra"</span><span class="p">:</span> <span class="p">{</span>
+                            <span class="s2">"repeated_command"</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+                            <span class="s2">"attempts"</span><span class="p">:</span> <span class="n">attempts</span><span class="p">,</span>
+                        <span class="p">},</span>
+                    <span class="p">}</span>
+                <span class="p">)</span>
+                <span class="k">continue</span>
 
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">verification_enabled</span> <span class="ow">and</span> <span class="n">command</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"mswea_verify "</span><span class="p">):</span>
                 <span class="n">verification_command</span> <span class="o">=</span> <span class="n">command</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="s2">"mswea_verify "</span><span class="p">):]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
@@ -2861,7 +2888,16 @@
                 <span class="bp">self</span><span class="o">.</span><span class="n">last_verification_passed</span> <span class="o">=</span> <span class="kc">False</span>
 
             <span class="k">try</span><span class="p">:</span>
-                <span class="n">outputs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">))</span>
+                <span class="n">output</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">)</span>
+                <span class="n">outputs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+
+                <span class="k">if</span> <span class="n">command</span><span class="p">:</span>
+                    <span class="k">if</span> <span class="n">output</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"returncode"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="p">[</span><span class="n">command</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span>
+                        <span class="p">)</span>
+                    <span class="k">else</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">command_attempts</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="n">command</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
             <span class="k">except</span> <span class="n">Submitted</span><span class="p">:</span>
                 <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">verification_enabled</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">last_verification_passed</span><span class="p">:</span>
                     <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span>
