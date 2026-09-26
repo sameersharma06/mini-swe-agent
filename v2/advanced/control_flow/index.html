@@ -2637,6 +2637,8 @@
 <span class="w">    </span><span class="sd">"""Stop agent after this many seconds of wall-clock time. 0 means no limit."""</span>
     <span class="n">max_consecutive_format_errors</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span>
     <span class="n">max_consecutive_execution_errors</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span>
+    <span class="n">verification_command</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">verification_timeout_seconds</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">30</span>
 <span class="w">    </span><span class="sd">"""Exit after this many format errors in a row (0 = no limit)."""</span>
     <span class="n">output_path</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
 <span class="w">    </span><span class="sd">"""Save the trajectory to this path."""</span>
@@ -2790,27 +2792,33 @@
         <span class="k">return</span> <span class="n">message</span>
 
     <span class="k">def</span><span class="w"> </span><span class="nf">execute_actions</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">message</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
-<span class="w">        </span><span class="sd">"""Execute actions, intercepting the completion protocol before shell execution."""</span>
+<span class="w">        </span><span class="sd">"""Execute actions and optionally independently verify completion."""</span>
         <span class="n">actions</span> <span class="o">=</span> <span class="n">message</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"extra"</span><span class="p">,</span> <span class="p">{})</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"actions"</span><span class="p">,</span> <span class="p">[])</span>
 
-        <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">:</span>
-            <span class="n">command</span> <span class="o">=</span> <span class="n">action</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"command"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
-            <span class="k">if</span> <span class="n">command</span> <span class="ow">in</span> <span class="p">{</span>
-                <span class="s2">"echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"</span><span class="p">,</span>
-                <span class="s2">"COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"</span><span class="p">,</span>
-            <span class="p">}:</span>
-                <span class="k">raise</span> <span class="n">Submitted</span><span class="p">(</span>
-                    <span class="p">{</span>
-                        <span class="s2">"role"</span><span class="p">:</span> <span class="s2">"exit"</span><span class="p">,</span>
-                        <span class="s2">"content"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
-                        <span class="s2">"extra"</span><span class="p">:</span> <span class="p">{</span>
-                            <span class="s2">"exit_status"</span><span class="p">:</span> <span class="s2">"Submitted"</span><span class="p">,</span>
-                            <span class="s2">"submission"</span><span class="p">:</span> <span class="s2">""</span><span class="p">,</span>
-                        <span class="p">},</span>
-                    <span class="p">}</span>
-                <span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">outputs</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">)</span> <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">]</span>
+        <span class="k">except</span> <span class="n">Submitted</span><span class="p">:</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">verification_command</span><span class="p">:</span>
+                <span class="k">raise</span>
 
-        <span class="n">outputs</span> <span class="o">=</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="n">action</span><span class="p">)</span> <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">]</span>
+            <span class="n">verification</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">env</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+                <span class="p">{</span><span class="s2">"command"</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">verification_command</span><span class="p">},</span>
+                <span class="n">timeout</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">verification_timeout_seconds</span><span class="p">,</span>
+            <span class="p">)</span>
+
+            <span class="k">if</span> <span class="n">verification</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"returncode"</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="k">raise</span>
+
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">add_messages</span><span class="p">(</span>
+                <span class="p">{</span>
+                    <span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span>
+                    <span class="s2">"content"</span><span class="p">:</span> <span class="p">(</span>
+                        <span class="s2">"Independent verification failed. "</span>
+                        <span class="s2">"Fix the issue and try again.</span><span class="se">\\</span><span class="s2">n"</span>
+                        <span class="sa">f</span><span class="s2">"Verifier output:</span><span class="se">\\</span><span class="s2">n</span><span class="si">{</span><span class="n">verification</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'output'</span><span class="p">,</span><span class="w"> </span><span class="s1">''</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span>
+                    <span class="p">),</span>
+                <span class="p">}</span>
+            <span class="p">)</span>
 
         <span class="k">if</span> <span class="n">outputs</span> <span class="ow">and</span> <span class="nb">all</span><span class="p">(</span><span class="n">output</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"returncode"</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">output</span> <span class="ow">in</span> <span class="n">outputs</span><span class="p">):</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">n_consecutive_execution_errors</span> <span class="o">+=</span> <span class="mi">1</span>
