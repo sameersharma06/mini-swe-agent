@@ -12,6 +12,7 @@ from jinja2 import StrictUndefined, Template
 from pydantic import BaseModel
 
 from minisweagent import Environment, Model, __version__
+from minisweagent.exceptions import Submitted
 from minisweagent.exceptions import FormatError, InterruptAgentFlow, LimitsExceeded, TimeExceeded
 from minisweagent.utils.serialize import recursive_merge
 
@@ -152,9 +153,32 @@ class DefaultAgent:
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
-        """Execute actions in message, add observation messages, return them."""
-        outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
-        return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+        """Execute actions, intercepting the completion protocol before shell execution."""
+        actions = message.get("extra", {}).get("actions", [])
+
+        for action in actions:
+            command = action.get("command", "").strip()
+            if command in {
+                "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+            }:
+                raise Submitted(
+                    {
+                        "role": "exit",
+                        "content": "",
+                        "extra": {
+                            "exit_status": "Submitted",
+                            "submission": "",
+                        },
+                    }
+                )
+
+        outputs = [self.env.execute(action) for action in actions]
+        return self.add_messages(
+            *self.model.format_observation_messages(
+                message, outputs, self.get_template_vars()
+            )
+        )
 
     def serialize(self, *extra_dicts) -> dict:
         """Serialize agent state to a json-compatible nested dictionary for saving."""
