@@ -31,6 +31,7 @@ class AgentConfig(BaseModel):
     wall_time_limit_seconds: int = 0
     """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
     max_consecutive_format_errors: int = 3
+    max_consecutive_execution_errors: int = 3
     """Exit after this many format errors in a row (0 = no limit)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
@@ -48,6 +49,7 @@ class DefaultAgent:
         self.cost = 0.0
         self.n_calls = 0
         self.n_consecutive_format_errors = 0
+        self.n_consecutive_execution_errors = 0
         self._start_time = time.time()
 
     def get_template_vars(self, **kwargs) -> dict:
@@ -174,6 +176,27 @@ class DefaultAgent:
                 )
 
         outputs = [self.env.execute(action) for action in actions]
+
+        if outputs and all(output.get("returncode", 0) != 0 for output in outputs):
+            self.n_consecutive_execution_errors += 1
+        else:
+            self.n_consecutive_execution_errors = 0
+
+        if (
+            0 < self.config.max_consecutive_execution_errors
+            <= self.n_consecutive_execution_errors
+        ):
+            return self.add_messages(
+                {
+                    "role": "exit",
+                    "content": "RepeatedExecutionError",
+                    "extra": {
+                        "exit_status": "RepeatedExecutionError",
+                        "submission": "",
+                    },
+                }
+            )
+
         return self.add_messages(
             *self.model.format_observation_messages(
                 message, outputs, self.get_template_vars()

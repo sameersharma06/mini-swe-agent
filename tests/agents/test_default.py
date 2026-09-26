@@ -478,6 +478,22 @@ class _FlakyToolcallModel(DeterministicToolcallModel):
         return output
 
 
+def test_repeated_execution_errors_terminate_cleanly(toolcall_config):
+    outputs = [
+        ("fail1", [{"command": "false"}]),
+        ("fail2", [{"command": "false"}]),
+        ("fail3", [{"command": "false"}]),
+    ]
+    agent = DefaultAgent(
+        model=make_tc_model(outputs),
+        env=LocalEnvironment(),
+        **{**toolcall_config, "max_consecutive_execution_errors": 3},
+    )
+    info = agent.run("Test repeated execution errors")
+    assert info["exit_status"] == "RepeatedExecutionError"
+    assert agent.n_calls == 3
+
+
 def test_repeated_format_errors_terminate_cleanly(toolcall_config):
     """With max_consecutive_format_errors set, a run that keeps producing no-tool-call / truncation
     turns stops cleanly with exit_status=RepeatedFormatError instead of looping until the budget is
