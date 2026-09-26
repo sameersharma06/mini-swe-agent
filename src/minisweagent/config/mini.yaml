@@ -4,6 +4,9 @@ agent:
   instance_template: |
     Please solve this issue: {{task}}
 
+    ## Repository Context
+    {{repo_context}}
+
     You can execute bash commands and edit files to implement the necessary changes.
 
     ## Recommended Workflow

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import traceback
+import os
 from pathlib import Path
 
 from jinja2 import StrictUndefined, Template
@@ -66,8 +67,38 @@ class DefaultAgent:
             kwargs,
         )
 
+    def _build_repo_context(self) -> str:
+        """Build a small, bounded repository map for initial task context."""
+        root = Path(self.env.get_template_vars().get("cwd") or os.getcwd())
+        if not root.is_dir():
+            return ""
+
+        important = []
+        for name in ("pyproject.toml", "package.json", "go.mod", "Cargo.toml", "Makefile"):
+            if (root / name).is_file():
+                important.append(name)
+
+        entries = []
+        try:
+            for path in sorted(root.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+                if path.name.startswith(".") or path.name in {"__pycache__", "node_modules", ".git"}:
+                    continue
+                prefix = path.name + "/" if path.is_dir() else path.name
+                entries.append(prefix)
+                if len(entries) >= 40:
+                    break
+        except OSError:
+            return ""
+
+        return (
+            f"Repository root: {root}\n"
+            f"Top-level entries: {', '.join(entries)}\n"
+            f"Project metadata: {', '.join(important) if important else 'none detected'}"
+        )
+
     def _render_template(self, template: str) -> str:
-        return Template(template, undefined=StrictUndefined).render(**self.get_template_vars())
+        template_vars = self.get_template_vars(repo_context=self._build_repo_context())
+        return Template(template, undefined=StrictUndefined).render(**template_vars)
 
     def add_messages(self, *messages: dict) -> list[dict]:
         self.logger.debug(messages)  # set log level to debug to see
