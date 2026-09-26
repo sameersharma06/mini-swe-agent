@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from minisweagent.agents.default import DefaultAgent
+from minisweagent.exceptions import Submitted
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.exceptions import FormatError
 from minisweagent.models import GLOBAL_MODEL_STATS
@@ -562,7 +563,6 @@ def test_format_errors_count_against_cost_limit(toolcall_config, reset_global_st
 
 def test_independent_verification_pass_preserves_submission(default_config, monkeypatch):
     """A successful verifier must preserve the original Submitted payload."""
-    from minisweagent.exceptions import Submitted
 
     config = dict(default_config)
     config["verification_command"] = "VERIFY"
@@ -642,3 +642,176 @@ def test_independent_verification_failure_blocks_submission(default_config, monk
 
     assert result[-1]["content"].startswith("Independent verification failed.")
     assert "test failure" in result[-1]["content"]
+
+
+def test_agent_verification_command_records_success(default_config, monkeypatch):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "verification_enabled": True},
+    )
+
+    original_execute = agent.env.execute
+
+    def execute(action, **kwargs):
+        if action["command"] == "pytest tests/test_visible.py":
+            return {"output": "3 passed", "returncode": 0, "exception_info": ""}
+        return original_execute(action, **kwargs)
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    agent.execute_actions(
+        {
+            "extra": {
+                "actions": [{"command": "mswea_verify pytest tests/test_visible.py"}]
+            }
+        }
+    )
+
+    assert agent.n_verification_attempts == 1
+    assert agent.last_verification_passed is True
+
+
+def test_agent_verification_command_records_failure(default_config, monkeypatch):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "verification_enabled": True},
+    )
+
+    def execute(action, **kwargs):
+        if action["command"] == "pytest tests/test_visible.py":
+            return {"output": "1 failed", "returncode": 1, "exception_info": ""}
+        return {"output": "", "returncode": 0, "exception_info": ""}
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    agent.execute_actions(
+        {
+            "extra": {
+                "actions": [{"command": "mswea_verify pytest tests/test_visible.py"}]
+            }
+        }
+    )
+
+    assert agent.n_verification_attempts == 1
+    assert agent.last_verification_passed is False
+
+
+def test_agent_verification_attempt_limit(default_config, monkeypatch):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{
+            **default_config,
+            "verification_enabled": True,
+            "max_verification_attempts": 1,
+        },
+    )
+
+    calls = []
+
+    def execute(action, **kwargs):
+        calls.append(action["command"])
+        return {"output": "failed", "returncode": 1, "exception_info": ""}
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    for _ in range(2):
+        agent.execute_actions(
+            {
+                "extra": {
+                    "actions": [{"command": "mswea_verify pytest tests/test_visible.py"}]
+                }
+            }
+        )
+
+    assert agent.n_verification_attempts == 1
+    assert calls == [
+        "pytest tests/test_visible.py",
+    ]
+
+
+def test_agent_completion_requires_verification_when_enabled(default_config, monkeypatch):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "verification_enabled": True},
+    )
+
+    def execute(action, **kwargs):
+        if action["command"] == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+            raise Submitted(
+                {
+                    "role": "exit",
+                    "content": "submitted",
+                    "extra": {"exit_status": "Submitted", "submission": "submitted"},
+                }
+            )
+        return {"output": "", "returncode": 0, "exception_info": ""}
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    result = agent.execute_actions(
+        {
+            "extra": {
+                "actions": [
+                    {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}
+                ]
+            }
+        }
+    )
+
+    assert result[-1]["role"] == "user"
+    assert "successful verification" in result[-1]["content"]
+
+
+def test_agent_completion_allowed_after_verification(default_config, monkeypatch):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "verification_enabled": True},
+    )
+
+    def execute(action, **kwargs):
+        command = action["command"]
+
+        if command == "pytest tests/test_visible.py":
+            return {"output": "3 passed", "returncode": 0, "exception_info": ""}
+
+        if command == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+            raise Submitted(
+                {
+                    "role": "exit",
+                    "content": "verified submission",
+                    "extra": {
+                        "exit_status": "Submitted",
+                        "submission": "verified submission",
+                    },
+                }
+            )
+
+        return {"output": "", "returncode": 0, "exception_info": ""}
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    agent.execute_actions(
+        {
+            "extra": {
+                "actions": [
+                    {"command": "mswea_verify pytest tests/test_visible.py"}
+                ]
+            }
+        }
+    )
+
+    with pytest.raises(Submitted):
+        agent.execute_actions(
+            {
+                "extra": {
+                    "actions": [
+                        {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}
+                    ]
+                }
+            }
+        )

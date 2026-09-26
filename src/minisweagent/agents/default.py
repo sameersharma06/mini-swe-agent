@@ -35,6 +35,8 @@ class AgentConfig(BaseModel):
     max_consecutive_execution_errors: int = 3
     verification_command: str | None = None
     verification_timeout_seconds: int = 30
+    verification_enabled: bool = False
+    max_verification_attempts: int = 3
     """Exit after this many format errors in a row (0 = no limit)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
@@ -53,6 +55,8 @@ class DefaultAgent:
         self.n_calls = 0
         self.n_consecutive_format_errors = 0
         self.n_consecutive_execution_errors = 0
+        self.n_verification_attempts = 0
+        self.last_verification_passed = False
         self._start_time = time.time()
 
     def get_template_vars(self, **kwargs) -> dict:
@@ -188,33 +192,105 @@ class DefaultAgent:
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
-        """Execute actions and optionally independently verify completion."""
+        """Execute actions with optional agent-driven verification and independent verification."""
         actions = message.get("extra", {}).get("actions", [])
+        outputs = []
 
-        try:
-            outputs = [self.env.execute(action) for action in actions]
-        except Submitted:
-            if not self.config.verification_command:
-                raise
+        for action in actions:
+            command = action.get("command", "").strip()
 
-            verification = self.env.execute(
-                {"command": self.config.verification_command},
-                timeout=self.config.verification_timeout_seconds,
-            )
+            if self.config.verification_enabled and command.startswith("mswea_verify "):
+                verification_command = command[len("mswea_verify "):].strip()
 
-            if verification.get("returncode", 1) == 0:
-                raise
+                if not verification_command:
+                    outputs.append(
+                        {
+                            "output": "Verification command is empty.",
+                            "returncode": 1,
+                            "exception_info": "",
+                            "extra": {"verification": True},
+                        }
+                    )
+                    self.last_verification_passed = False
+                    continue
 
-            return self.add_messages(
-                {
-                    "role": "user",
-                    "content": (
-                        "Independent verification failed. "
-                        "Fix the issue and try again.\\n"
-                        f"Verifier output:\\n{verification.get('output', '')}"
-                    ),
+                if (
+                    self.config.max_verification_attempts > 0
+                    and self.n_verification_attempts
+                    >= self.config.max_verification_attempts
+                ):
+                    outputs.append(
+                        {
+                            "output": (
+                                "Verification attempt limit reached. "
+                                "No further verification commands are allowed."
+                            ),
+                            "returncode": 1,
+                            "exception_info": "",
+                            "extra": {"verification": True},
+                        }
+                    )
+                    self.last_verification_passed = False
+                    continue
+
+                self.n_verification_attempts += 1
+                verification = self.env.execute(
+                    {"command": verification_command},
+                    timeout=self.config.verification_timeout_seconds,
+                )
+                verification.setdefault("extra", {})
+                verification["extra"]["verification"] = True
+                verification["extra"]["verification_command"] = verification_command
+
+                self.last_verification_passed = verification.get("returncode", 1) == 0
+                outputs.append(verification)
+                continue
+
+            if (
+                self.config.verification_enabled
+                and command
+                not in {
+                    "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                    "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
                 }
-            )
+            ):
+                self.last_verification_passed = False
+
+            try:
+                outputs.append(self.env.execute(action))
+            except Submitted:
+                if self.config.verification_enabled and not self.last_verification_passed:
+                    return self.add_messages(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Before submitting, run at least one successful "
+                                "verification using `mswea_verify <command>`."
+                            ),
+                        }
+                    )
+
+                if not self.config.verification_command:
+                    raise
+
+                verification = self.env.execute(
+                    {"command": self.config.verification_command},
+                    timeout=self.config.verification_timeout_seconds,
+                )
+
+                if verification.get("returncode", 1) == 0:
+                    raise
+
+                return self.add_messages(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Independent verification failed. "
+                            "Fix the issue and try again.\n"
+                            f"Verifier output:\n{verification.get('output', '')}"
+                        ),
+                    }
+                )
 
         if outputs and all(output.get("returncode", 0) != 0 for output in outputs):
             self.n_consecutive_execution_errors += 1
