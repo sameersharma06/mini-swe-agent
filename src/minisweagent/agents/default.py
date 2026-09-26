@@ -37,6 +37,7 @@ class AgentConfig(BaseModel):
     verification_timeout_seconds: int = 30
     verification_enabled: bool = False
     max_verification_attempts: int = 3
+    max_repeated_command_attempts: int = 2
     """Exit after this many format errors in a row (0 = no limit)."""
     output_path: Path | None = None
     """Save the trajectory to this path."""
@@ -57,6 +58,7 @@ class DefaultAgent:
         self.n_consecutive_execution_errors = 0
         self.n_verification_attempts = 0
         self.last_verification_passed = False
+        self.command_attempts: dict[str, int] = {}
         self._start_time = time.time()
 
     def get_template_vars(self, **kwargs) -> dict:
@@ -192,12 +194,37 @@ class DefaultAgent:
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
-        """Execute actions with optional agent-driven verification and independent verification."""
+        """Execute actions with optional verification and repeated-failure protection."""
         actions = message.get("extra", {}).get("actions", [])
         outputs = []
 
         for action in actions:
             command = action.get("command", "").strip()
+
+            if (
+                command
+                and not command.startswith("mswea_verify ")
+                and self.config.max_repeated_command_attempts > 0
+                and self.command_attempts.get(command, 0)
+                >= self.config.max_repeated_command_attempts
+            ):
+                attempts = self.command_attempts[command]
+                outputs.append(
+                    {
+                        "output": (
+                            f"Command repeatedly failed {attempts} times. "
+                            "Avoid repeating the same failing command and "
+                            "choose a different diagnostic or implementation step."
+                        ),
+                        "returncode": 1,
+                        "exception_info": "",
+                        "extra": {
+                            "repeated_command": True,
+                            "attempts": attempts,
+                        },
+                    }
+                )
+                continue
 
             if self.config.verification_enabled and command.startswith("mswea_verify "):
                 verification_command = command[len("mswea_verify "):].strip()
@@ -257,7 +284,16 @@ class DefaultAgent:
                 self.last_verification_passed = False
 
             try:
-                outputs.append(self.env.execute(action))
+                output = self.env.execute(action)
+                outputs.append(output)
+
+                if command:
+                    if output.get("returncode", 0) != 0:
+                        self.command_attempts[command] = (
+                            self.command_attempts.get(command, 0) + 1
+                        )
+                    else:
+                        self.command_attempts.pop(command, None)
             except Submitted:
                 if self.config.verification_enabled and not self.last_verification_passed:
                     return self.add_messages(

@@ -815,3 +815,75 @@ def test_agent_completion_allowed_after_verification(default_config, monkeypatch
                 }
             }
         )
+
+
+def test_repeated_command_guard_allows_successful_repeats(default_config):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "max_repeated_command_attempts": 2},
+    )
+
+    calls = []
+
+    def execute(action, **kwargs):
+        calls.append(action["command"])
+        return {"output": "ok", "returncode": 0, "exception_info": ""}
+
+    agent.env.execute = execute
+
+    message = {"extra": {"actions": [{"command": "echo inspect"}]}}
+
+    agent.execute_actions(message)
+    agent.execute_actions(message)
+    agent.execute_actions(message)
+
+    assert calls == ["echo inspect", "echo inspect", "echo inspect"]
+
+
+def test_repeated_command_guard_blocks_repeated_failures(default_config):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "max_repeated_command_attempts": 2},
+    )
+
+    calls = []
+
+    def execute(action, **kwargs):
+        calls.append(action["command"])
+        return {"output": "failed", "returncode": 1, "exception_info": ""}
+
+    agent.env.execute = execute
+
+    message = {"extra": {"actions": [{"command": "echo inspect"}]}}
+
+    agent.execute_actions(message)
+    agent.execute_actions(message)
+    result = agent.execute_actions(message)
+
+    assert calls == ["echo inspect", "echo inspect"]
+    assert result[-1]["role"] == "exit"
+    assert result[-1]["extra"]["exit_status"] == "RepeatedExecutionError"
+
+
+def test_repeated_command_guard_tracks_commands_independently(default_config):
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **{**default_config, "max_repeated_command_attempts": 1},
+    )
+
+    calls = []
+
+    def execute(action, **kwargs):
+        calls.append(action["command"])
+        return {"output": "failed", "returncode": 1, "exception_info": ""}
+
+    agent.env.execute = execute
+
+    agent.execute_actions({"extra": {"actions": [{"command": "echo one"}]}})
+    agent.execute_actions({"extra": {"actions": [{"command": "echo two"}]}})
+
+    assert calls == ["echo one", "echo two"]
+
