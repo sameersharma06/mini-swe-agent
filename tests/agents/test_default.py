@@ -561,6 +561,40 @@ def test_format_errors_count_against_cost_limit(toolcall_config, reset_global_st
     assert agent.cost == GLOBAL_MODEL_STATS.cost
 
 
+def test_failed_action_stops_remaining_actions(default_config, monkeypatch):
+    """A failed action must prevent later actions in the same batch from running."""
+    agent = DefaultAgent(
+        model=make_text_model([]),
+        env=LocalEnvironment(),
+        **default_config,
+    )
+
+    executed = []
+
+    def execute(action, *args, **kwargs):
+        command = action.get("command")
+        executed.append(command)
+        if command == "FAIL":
+            return {"output": "failed\\n", "returncode": 1, "exception_info": ""}
+        return {"output": "ran\\n", "returncode": 0, "exception_info": ""}
+
+    monkeypatch.setattr(agent.env, "execute", execute)
+
+    result = agent.execute_actions(
+        {
+            "extra": {
+                "actions": [
+                    {"command": "FAIL"},
+                    {"command": "SHOULD_NOT_RUN"},
+                ]
+            }
+        }
+    )
+
+    assert executed == ["FAIL"]
+
+
+
 def test_independent_verification_pass_preserves_submission(default_config, monkeypatch):
     """A successful verifier must preserve the original Submitted payload."""
 

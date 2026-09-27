@@ -328,6 +328,8 @@ class DefaultAgent:
                         self.command_attempts[command] = (
                             self.command_attempts.get(command, 0) + 1
                         )
+                        outputs.append({"output": "Skipped remaining actions because the previous action failed. Reassess the failure before continuing.", "returncode": 1, "exception_info": "", "extra": {"skipped_after_failure": True}})
+                        break
                     else:
                         self.command_attempts.pop(command, None)
             except Submitted:
